@@ -1,12 +1,9 @@
-pip install requests beautifulsoup4 lxml
-
-
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Optional
 
-from base_parser import BaseParser, Article
+
 
 NGS_SITES = {
     "Екатеринбург": ("https://www.e1.ru",    "e1.ru"),
@@ -53,7 +50,7 @@ class NGSSMIParser(BaseParser):
         return self._results
 
     def _get_article_links(self, limit: int) -> List[str]:
-        links = [] 
+        links = []
         news_url = f"{self.base_url}/text/"
         try:
             resp = self.session.get(news_url, timeout=10)
@@ -65,7 +62,7 @@ class NGSSMIParser(BaseParser):
 
         soup = BeautifulSoup(resp.text, "lxml")
 
-        
+
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
             if "/text/" in href and href.rstrip("/").split("/")[-1].isdigit():
@@ -88,7 +85,7 @@ class NGSSMIParser(BaseParser):
 
         soup = BeautifulSoup(resp.text, "lxml")
 
-        
+
         title = ""
         h1 = soup.find("h1")
         if h1:
@@ -132,7 +129,7 @@ class NGSSMIParser(BaseParser):
                 return datetime.fromisoformat(time_tag["datetime"][:19])
             except ValueError:
                 pass
-       
+
         meta = soup.find("meta", attrs={"property": "article:published_time"})
         if meta and meta.get("content"):
             try:
