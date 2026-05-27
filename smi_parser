@@ -1,0 +1,180 @@
+pip install requests beautifulsoup4 lxml
+
+
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+from typing import List, Optional
+
+from base_parser import BaseParser, Article
+
+NGS_SITES = {
+    "Екатеринбург": ("https://www.e1.ru",    "e1.ru"),
+    "Новосибирск":  ("https://ngs.ru",        "ngs.ru"),
+    "Челябинск":    ("https://www.74.ru",     "74.ru"),
+    "Ростов":       ("https://161.ru",        "161.ru"),
+    "Омск":         ("https://ngs55.ru",      "ngs55.ru"),
+    "Краснодар":    ("https://www.93.ru",     "93.ru"),
+}
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ru-RU,ru;q=0.9",
+}
+
+
+class NGSSMIParser(BaseParser):
+    def __init__(self, region: str):
+        if region not in NGS_SITES:
+            raise ValueError(f"регион '{region}' не поддерживается. "
+                             f"доступно: {list(NGS_SITES.keys())}")
+        base_url, source_name = NGS_SITES[region]
+        super().__init__(region=region, source_name=source_name, delay=1.5)
+        self.base_url = base_url
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+
+    def parse(self, limit: int = 50) -> List[Article]:
+        self._log(f"начинаем сбор статей (лимит={limit})")
+        links = self._get_article_links(limit)
+        self._log(f"найдено ссылок: {len(links)}")
+
+        for url in links:
+            article = self._parse_article(url)
+            if article:
+                self._results.append(article)
+            self._sleep()
+
+        self._log(f"cобрано статей: {len(self._results)}")
+        return self._results
+
+    def _get_article_links(self, limit: int) -> List[str]:
+        links = [] 
+        news_url = f"{self.base_url}/text/"
+        try:
+            resp = self.session.get(news_url, timeout=10)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            self._log(f"error: {e}")
+            return links
+
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"]
+            if "/text/" in href and href.rstrip("/").split("/")[-1].isdigit():
+                full_url = href if href.startswith("http") else self.base_url + href
+                if full_url not in links:
+                    links.append(full_url)
+            if len(links) >= limit:
+                break
+
+        return links
+
+    def _parse_article(self, url: str) -> Optional[Article]:
+        try:
+            resp = self.session.get(url, timeout=10)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            self._log(f"error {url}: {e}")
+            return None
+
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        
+        title = ""
+        h1 = soup.find("h1")
+        if h1:
+            title = h1.get_text(strip=True)
+
+        text_blocks = []
+        article_body = soup.find(
+            lambda tag: tag.name in ("div", "article")
+            and any("article" in c.lower() for c in tag.get("class", []))
+        )
+        if article_body:
+            paragraphs = article_body.find_all("p")
+        else:
+            paragraphs = [p for p in soup.find_all("p") if len(p.get_text()) > 60]
+
+        for p in paragraphs:
+            text_blocks.append(p.get_text(separator=" ", strip=True))
+
+        text = "\n".join(text_blocks)
+
+        if len(text) < 100:
+            self._log(f"мало текста: {url}")
+            return None
+
+        date = self._extract_date(soup)
+
+        return Article(
+            text=text,
+            source=self.source_name,
+            region=self.region,
+            text_type="smi",
+            url=url,
+            title=title,
+            date=date,
+        )
+
+    def _extract_date(self, soup: BeautifulSoup) -> Optional[datetime]:
+        time_tag = soup.find("time", attrs={"datetime": True})
+        if time_tag:
+            try:
+                return datetime.fromisoformat(time_tag["datetime"][:19])
+            except ValueError:
+                pass
+       
+        meta = soup.find("meta", attrs={"property": "article:published_time"})
+        if meta and meta.get("content"):
+            try:
+                return datetime.fromisoformat(meta["content"][:19])
+            except ValueError:
+                pass
+
+        return None
+
+
+class MultiRegionSMIParser:
+    def __init__(self, regions: Optional[List[str]] = None):
+        self.regions = regions or list(NGS_SITES.keys())
+        self.parsers = [NGSSMIParser(r) for r in self.regions]
+        self.all_articles: List[Article] = []
+
+    def parse_all(self, limit_per_region: int = 30) -> List[Article]:
+        for parser in self.parsers:
+            articles = parser.parse(limit=limit_per_region)
+            self.all_articles.extend(articles)
+        return self.all_articles
+
+    def save_all(self, filepath: str):
+        import csv
+        with open(filepath, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["source", "region", "text_type",
+                                                    "title", "url", "date", "text"])
+            writer.writeheader()
+            for art in self.all_articles:
+                writer.writerow({
+                    "source": art.source,
+                    "region": art.region,
+                    "text_type": art.text_type,
+                    "title": art.title,
+                    "url": art.url,
+                    "date": art.date.isoformat() if art.date else "",
+                    "text": art.text,
+                })
+        print(f"cохранено {len(self.all_articles)} статей: {filepath}")
+
+if __name__ == "__main__":
+    parser = NGSSMIParser(region="Екатеринбург")
+    articles = parser.parse(limit=5)
+    for art in articles:
+        print(art)
+        print("Текст (первые 200 символов):", art.text[:200])
+        print("---")
