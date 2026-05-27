@@ -252,8 +252,6 @@ class YouTubeSeleniumParser(BaseParser):
 
 
 if __name__ == "__main__":
-    
-    print("=== Тест YouTubeTranscriptParser (без Selenium) ===")
     parser = YouTubeTranscriptParser(region="Екатеринбург")
     articles = parser.parse(limit=3)
     for art in articles:
@@ -262,7 +260,6 @@ if __name__ == "__main__":
         print("---")
 
     
-    print("\n=== Тест YouTubeSeleniumParser (Selenium) ===")
     parser_sel = YouTubeSeleniumParser(region="Екатеринбург", headless=True)
     articles_sel = parser_sel.parse(limit=5)
     for art in articles_sel:
