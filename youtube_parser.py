@@ -1,11 +1,11 @@
+!pip install youtube-transcript-api
+
 import time
 import re
 from datetime import datetime
 from typing import List, Optional
 
-from base_parser import BaseParser, Article
-
-
+# Региональные YouTube-каналы
 REGIONAL_CHANNELS = {
     "Екатеринбург": [
         ("UCZnMr7EGMpE-p2J-XzxbUQA", "E1.ru"),
@@ -43,19 +43,29 @@ REGIONAL_CHANNELS = {
 
 
 class YouTubeTranscriptParser(BaseParser):
+    """
+    Парсер субтитров YouTube через youtube-transcript-api + RSS.
+    Не требует Selenium, работает в Colab.
+    """
+
     def __init__(self, region: str):
         if region not in REGIONAL_CHANNELS:
-            raise ValueError(f"'{region}' не поддерживается.")
+            raise ValueError(f"Регион '{region}' не поддерживается. "
+                             f"Доступные: {list(REGIONAL_CHANNELS.keys())}")
         super().__init__(region=region, source_name="youtube_transcript", delay=1.0)
         self.channels = REGIONAL_CHANNELS[region]
 
-    
+    def parse(self, limit: int = 20) -> List[Article]:
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+        except ImportError:
+            raise ImportError("Установи: pip install youtube-transcript-api")
 
-        self._log(f"сбор субтитров (лимит={limit})")
+        self._log(f"Начинаем сбор субтитров (лимит={limit})")
         limit_per_channel = max(1, limit // len(self.channels))
 
         for channel_id, channel_name in self.channels:
-            video_ids = self._get_video_ids_simple(channel_id, limit_per_channel)
+            video_ids = self._get_video_ids_rss(channel_id, limit_per_channel)
             self._log(f"Канал '{channel_name}': найдено {len(video_ids)} видео")
 
             for video_id in video_ids:
@@ -86,11 +96,11 @@ class YouTubeTranscriptParser(BaseParser):
 
                 self._sleep()
 
-        self._log(f"{len(self._results)} видео с субтитрами")
+        self._log(f"Итого: {len(self._results)} видео с субтитрами")
         return self._results
 
-    def _get_video_ids_simple(self, channel_id: str, limit: int) -> List[str]:
-
+    def _get_video_ids_rss(self, channel_id: str, limit: int) -> List[str]:
+        """Получает ID видео через RSS-фид канала (без API-ключа)."""
         import requests
         from xml.etree import ElementTree as ET
 
@@ -99,11 +109,13 @@ class YouTubeTranscriptParser(BaseParser):
             resp = requests.get(url, timeout=10)
             resp.raise_for_status()
         except Exception as e:
-            self._log(f"ошибка RSS для {channel_id}: {e}")
+            self._log(f"Ошибка RSS для {channel_id}: {e}")
             return []
 
-        ns = {"yt": "http://www.youtube.com/xml/schemas/2015",
-              "atom": "http://www.w3.org/2005/Atom"}
+        ns = {
+            "yt": "http://www.youtube.com/xml/schemas/2015",
+            "atom": "http://www.w3.org/2005/Atom"
+        }
         root = ET.fromstring(resp.text)
         video_ids = []
         for entry in root.findall("atom:entry", ns):
@@ -117,6 +129,10 @@ class YouTubeTranscriptParser(BaseParser):
 
 
 class YouTubeSeleniumParser(BaseParser):
+    """
+    Динамический парсинг YouTube через Selenium.
+    Запускать локально (не в Colab) — там нет Chrome.
+    """
 
     def __init__(self, region: str, headless: bool = True):
         if region not in REGIONAL_CHANNELS:
@@ -126,46 +142,12 @@ class YouTubeSeleniumParser(BaseParser):
         self.channels = REGIONAL_CHANNELS[region]
         self._driver = None
 
-    def _start_driver(self):
-        """Инициализирует Selenium WebDriver."""
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.chrome.options import Options
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-        except ImportError:
-            # webdriver-manager не установлен — используем chromedriver из PATH
-            service = Service()
-
-        options = Options()
-        if self.headless:
-            options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--lang=ru-RU")
-        options.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 Chrome/124.0.0 Safari/537.36"
-        )
-        self._driver = webdriver.Chrome(service=service, options=options)
-        self._driver.set_page_load_timeout(30)
-        self._log("Браузер запущен")
-
-    def _stop_driver(self):
-        if self._driver:
-            self._driver.quit()
-            self._driver = None
-            self._log("Браузер закрыт")
-
     def parse(self, limit: int = 20) -> List[Article]:
         self._start_driver()
         try:
             limit_per_channel = max(1, limit // len(self.channels))
             for channel_id, channel_name in self.channels:
-                video_ids = self._scrape_channel_videos(channel_id, channel_name,
-                                                         limit_per_channel)
+                video_ids = self._scrape_channel_videos(channel_id, limit_per_channel)
                 self._log(f"Канал '{channel_name}': найдено {len(video_ids)} ссылок")
                 for vid_id in video_ids:
                     article = self._get_transcript(vid_id, channel_name, channel_id)
@@ -178,28 +160,46 @@ class YouTubeSeleniumParser(BaseParser):
         self._log(f"Итого: {len(self._results)} статей с субтитрами")
         return self._results
 
+    def _start_driver(self):
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = Service(ChromeDriverManager().install())
+        except ImportError:
+            service = Service()
 
-    def _scrape_channel_videos(self, channel_id: str,
-                                channel_name: str, limit: int) -> List[str]:
+        options = Options()
+        if self.headless:
+            options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--lang=ru-RU")
+        self._driver = webdriver.Chrome(service=service, options=options)
+        self._driver.set_page_load_timeout(30)
+        self._log("Браузер запущен")
 
+    def _stop_driver(self):
+        if self._driver:
+            self._driver.quit()
+            self._driver = None
+
+    def _scrape_channel_videos(self, channel_id: str, limit: int) -> List[str]:
         from selenium.webdriver.common.by import By
 
-        url = f"https://www.youtube.com/@{channel_id}/videos"
-        
         if channel_id.startswith("UC"):
             url = f"https://www.youtube.com/channel/{channel_id}/videos"
+        else:
+            url = f"https://www.youtube.com/@{channel_id}/videos"
 
-        self._log(f"Открываем: {url}")
         self._driver.get(url)
-        time.sleep(3)  # Ждём загрузки JS
+        time.sleep(3)
 
-        
         video_ids = set()
         scroll_attempts = 0
-        max_scrolls = 5
 
-        while len(video_ids) < limit and scroll_attempts < max_scrolls:
-            
+        while len(video_ids) < limit and scroll_attempts < 5:
             links = self._driver.find_elements(
                 By.CSS_SELECTOR, "a#video-title-link, a[href*='/watch?v=']"
             )
@@ -208,11 +208,8 @@ class YouTubeSeleniumParser(BaseParser):
                 match = re.search(r"v=([A-Za-z0-9_\-]{11})", href)
                 if match:
                     video_ids.add(match.group(1))
-
             if len(video_ids) >= limit:
                 break
-
-            
             self._driver.execute_script(
                 "window.scrollTo(0, document.documentElement.scrollHeight);"
             )
@@ -223,19 +220,14 @@ class YouTubeSeleniumParser(BaseParser):
 
     def _get_transcript(self, video_id: str,
                          channel_name: str, channel_id: str) -> Optional[Article]:
-        
         try:
-            from youtube_transcript_api import (YouTubeTranscriptApi,
-                                                NoTranscriptFound,
-                                                TranscriptsDisabled)
+            from youtube_transcript_api import YouTubeTranscriptApi
             transcript_list = YouTubeTranscriptApi.get_transcript(
                 video_id, languages=["ru"]
             )
             text = " ".join(entry["text"] for entry in transcript_list)
             if len(text) < 100:
                 return None
-
-            self._log(f"  ✓ {video_id}: {len(text)} символов")
             return Article(
                 text=text,
                 source="youtube",
@@ -251,16 +243,48 @@ class YouTubeSeleniumParser(BaseParser):
             return None
 
 
-if __name__ == "__main__":
-    parser = YouTubeTranscriptParser(region="Екатеринбург")
-    articles = parser.parse(limit=3)
-    for art in articles:
-        print(art)
-        print("Начало текста:", art.text[:300])
-        print("---")
 
-    
-    parser_sel = YouTubeSeleniumParser(region="Екатеринбург", headless=True)
-    articles_sel = parser_sel.parse(limit=5)
-    for art in articles_sel:
-        print(art)
+try:
+    parser = YouTubeTranscriptParser(region="Екатеринбург")
+
+    print("Каналы:", parser.channels)
+except Exception as e:
+    print(" Ошибка:", e)
+
+
+import requests
+
+API_KEY = "AIzaSyABQ0BxF3WLOirpVhhUT1WI75QBpwbB5ow"
+
+def get_channel_id(query: str) -> tuple:
+    """Находит channel_id и название канала по поисковому запросу."""
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "part": "snippet",
+        "q": query,
+        "type": "channel",
+        "maxResults": 1,
+        "key": API_KEY,
+    }
+    resp = requests.get(url, params=params)
+    items = resp.json().get("items", [])
+    if not items:
+        return None, None
+    channel_id = items[0]["snippet"]["channelId"]
+    channel_name = items[0]["snippet"]["title"]
+    return channel_id, channel_name
+
+queries = [
+    "E1.ru Екатеринбург новости",
+    "НГС Новосибирск",
+    "74.ru Челябинск",
+    "161.ru Ростов",
+    "93.ru Краснодар",
+    "Москва 24",
+    "Фонтанка Петербург",
+    "НГС55 Омск",
+]
+
+for query in queries:
+    channel_id, name = get_channel_id(query)
+    print(f"{query}: {name} → {channel_id}")
